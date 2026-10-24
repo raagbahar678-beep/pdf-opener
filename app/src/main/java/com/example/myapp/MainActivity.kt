@@ -210,6 +210,7 @@ class PageView(ctx: Context) : View(ctx) {
     var onEdge: ((Int) -> Unit)? = null
     var onTouched: (() -> Unit)? = null
     var onResized: (() -> Unit)? = null
+    var onTap: (() -> Unit)? = null
 
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val density = ctx.resources.displayMetrics.density
@@ -245,6 +246,11 @@ class PageView(ctx: Context) : View(ctx) {
         override fun onDown(e: MotionEvent): Boolean {
             scroller.forceFinished(true)
             overAccum = 0f
+            return true
+        }
+
+        override fun onSingleTapUp(e: MotionEvent): Boolean {
+            onTap?.invoke()
             return true
         }
 
@@ -528,14 +534,23 @@ class PdfPane(private val a: MainActivity, val index: Int) {
         title.setSingleLine(true)
         title.ellipsize = TextUtils.TruncateAt.MIDDLE
         title.setPadding(a.dp(6), a.dp(4), a.dp(4), a.dp(4))
-        title.text = "(empty pane)"
-        title.setOnClickListener { a.setActive(index) }
+        title.text = "(empty pane " + (index + 1) + " - tap here or + to add a PDF)"
+        title.setOnClickListener {
+            a.setActive(index)
+            if (item == null) a.showFilesDialog(index)
+        }
         val closeBtn = a.mkBtn("X")
         closeBtn.setOnClickListener {
             a.setActive(index)
             clear()
         }
         titleRow.addView(title, LinearLayout.LayoutParams(0, wrap, 1f))
+        val addBtn = a.mkBtn("+")
+        addBtn.setOnClickListener {
+            a.setActive(index)
+            a.showFilesDialog(index)
+        }
+        titleRow.addView(addBtn, LinearLayout.LayoutParams(a.dp(34), wrap))
         titleRow.addView(closeBtn, LinearLayout.LayoutParams(a.dp(34), wrap))
         root.addView(titleRow, LinearLayout.LayoutParams(match, wrap))
 
@@ -647,6 +662,9 @@ class PdfPane(private val a: MainActivity, val index: Int) {
         root.addView(hRow, LinearLayout.LayoutParams(match, a.dp(14)))
 
         pv.onTouched = { a.setActive(index) }
+        pv.onTap = {
+            if (item == null) a.showFilesDialog(index)
+        }
         pv.onEdge = { dir ->
             if (dir > 0) {
                 if (page < count - 1) goToPage(page + 1, 1)
@@ -754,7 +772,7 @@ class PdfPane(private val a: MainActivity, val index: Int) {
         item = null
         page = 0
         count = 0
-        title.text = "(empty pane)"
+        title.text = "(empty pane " + (index + 1) + " - tap here or + to add a PDF)"
         pageEdit.setText("")
         totalTv.text = "/ 0"
         seek.max = 0
@@ -925,7 +943,10 @@ class MainActivity : Activity() {
     private lateinit var paneBtn: Button
     private val panes = ArrayList<PdfPane>()
     private val openedFiles = ArrayList<PdfItem>()
-    private val folderFiles = ArrayList<PdfItem>()
+    private val paneFolderFiles = Array(3) { ArrayList<PdfItem>() }
+    private val paneFolderUri = arrayOfNulls<String>(3)
+    private val paneFolderName = arrayOf("", "", "")
+    private var treeTarget = 0
     private var paneCount = 2
     private var active = 0
     private var chromeHidden = false
@@ -996,7 +1017,7 @@ class MainActivity : Activity() {
         val bHide = mkBtn("Hide bars")
         bOpen.setOnClickListener { openFiles() }
         bFolder.setOnClickListener { openFolder() }
-        bList.setOnClickListener { showFilesDialog() }
+        bList.setOnClickListener { showFilesDialog(active) }
         paneBtn.setOnClickListener { setPaneCount(if (paneCount >= 3) 1 else paneCount + 1) }
         orientBtn.setOnClickListener { showOrientDialog() }
         bHide.setOnClickListener { setChromeHidden(true) }
@@ -1038,9 +1059,13 @@ class MainActivity : Activity() {
         applyChrome()
         handleViewIntent(intent)
 
-        val folder = prefs.getString("folder", null)
-        if (folder != null) {
-            scanFolder(Uri.parse(folder), false)
+        val oldFolder = prefs.getString("folder", null)
+        for (i in 0 until 3) {
+            val fs = prefs.getString("folder" + i, oldFolder)
+            if (fs != null) {
+                paneFolderUri[i] = fs
+                scanFolder(i, Uri.parse(fs), false)
+            }
         }
         updateStatus()
     }
@@ -1132,7 +1157,7 @@ class MainActivity : Activity() {
             return when (code) {
                 KeyEvent.KEYCODE_O -> { openFiles(); true }
                 KeyEvent.KEYCODE_D -> { openFolder(); true }
-                KeyEvent.KEYCODE_L -> { showFilesDialog(); true }
+                KeyEvent.KEYCODE_L -> { showFilesDialog(active); true }
                 KeyEvent.KEYCODE_G -> {
                     if (chromeHidden) setChromeHidden(false)
                     p.focusPageBox()
@@ -1252,6 +1277,11 @@ class MainActivity : Activity() {
     }
 
     private fun openFolder() {
+        openFolderFor(active)
+    }
+
+    private fun openFolderFor(pane: Int) {
+        treeTarget = pane.coerceIn(0, 2)
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
         i.addFlags(
             Intent.FLAG_GRANT_READ_URI_PERMISSION or
@@ -1318,8 +1348,10 @@ class MainActivity : Activity() {
         } else if (requestCode == REQ_TREE) {
             val tree = data.data ?: return
             persist(tree)
-            prefs.edit().putString("folder", tree.toString()).apply()
-            scanFolder(tree, true)
+            val pi = treeTarget
+            paneFolderUri[pi] = tree.toString()
+            prefs.edit().putString("folder" + pi, tree.toString()).apply()
+            scanFolder(pi, tree, true)
         }
     }
 
@@ -1388,7 +1420,16 @@ class MainActivity : Activity() {
     }
 
     // Scans the chosen folder (and sub-folders) for PDFs on a background thread.
-    private fun scanFolder(tree: Uri, showDialog: Boolean) {
+    private fun folderLabel(tree: Uri): String {
+        try {
+            val s = DocumentsContract.getTreeDocumentId(tree).substringAfterLast('/').substringAfterLast(':')
+            return if (s.isEmpty()) "storage" else s
+        } catch (t: Throwable) {
+            return "folder"
+        }
+    }
+
+    private fun scanFolder(pane: Int, tree: Uri, showDialog: Boolean) {
         if (showDialog) toast("Scanning folder...")
         Thread {
             val list = ArrayList<PdfItem>()
@@ -1424,11 +1465,12 @@ class MainActivity : Activity() {
             }
             list.sortWith(compareBy<PdfItem> { it.name.lowercase() })
             runOnUiThread {
-                folderFiles.clear()
-                folderFiles.addAll(list)
+                paneFolderFiles[pane].clear()
+                paneFolderFiles[pane].addAll(list)
+                paneFolderName[pane] = folderLabel(tree)
                 if (showDialog) {
-                    toast("Folder: " + list.size + " PDF files")
-                    showFilesDialog()
+                    toast("Pane " + (pane + 1) + " folder: " + list.size + " PDF files")
+                    showFilesDialog(pane)
                 }
                 updateStatus()
             }
@@ -1436,18 +1478,16 @@ class MainActivity : Activity() {
     }
 
     // ───── file list dialog (search + tap to open) ─────
-    private fun showFilesDialog() {
+    // Per-pane chooser: this pane's own folder + history, Browse PDF, Choose folder, Clear history.
+    fun showFilesDialog(pane: Int) {
+        val target = pane.coerceIn(0, 2)
         val all = ArrayList<PdfItem>()
         val seen = HashSet<String>()
+        for (f in paneFolderFiles[target]) {
+            if (seen.add(f.uri.toString())) all.add(f)
+        }
         for (f in openedFiles) {
             if (seen.add(f.uri.toString())) all.add(f)
-        }
-        for (f in folderFiles) {
-            if (seen.add(f.uri.toString())) all.add(f)
-        }
-        if (all.isEmpty()) {
-            toast("No PDFs yet. Use Open PDFs or Folder.")
-            return
         }
         val shown = ArrayList<PdfItem>(all)
         val histSet = HashSet<String>()
@@ -1470,7 +1510,7 @@ class MainActivity : Activity() {
                     tv.maxLines = 2
                     tv.ellipsize = TextUtils.TruncateAt.MIDDLE
                 }
-                tv.text = (if (histSet.contains(shown[position].uri.toString())) "\u2605 " else "") + shown[position].name
+                tv.text = (if (histSet.contains(shown[position].uri.toString())) "★ " else "") + shown[position].name
                 return tv
             }
         }
@@ -1478,11 +1518,24 @@ class MainActivity : Activity() {
         val box = LinearLayout(this)
         box.orientation = LinearLayout.VERTICAL
         box.setPadding(dp(8), dp(8), dp(8), 0)
+        val fname = if (paneFolderName[target].isEmpty()) "none" else paneFolderName[target]
         val hint = TextView(this)
         hint.setTextColor(Color.LTGRAY)
         hint.textSize = 12f
-        hint.text = "Pane " + (active + 1) + " is active. Tap = open there. Long-press = open in next pane. \u2605 = in your history (remembered). (" + all.size + " files)"
+        hint.text = "Pane " + (target + 1) + " folder: " + fname + " (" + paneFolderFiles[target].size +
+            " PDFs). Tap = open in this pane. Long-press = open in next pane. ★ = in your history."
         box.addView(hint)
+
+        val btnRow = LinearLayout(this)
+        btnRow.orientation = LinearLayout.HORIZONTAL
+        val bBrowse = mkBtn("Browse PDF")
+        val bFolder = mkBtn("Choose folder")
+        val bClear = mkBtn("Clear history")
+        btnRow.addView(bBrowse, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        btnRow.addView(bFolder, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        btnRow.addView(bClear, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        box.addView(btnRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
         val search = EditText(this)
         search.hint = "Search..."
         search.setHintTextColor(Color.GRAY)
@@ -1491,28 +1544,40 @@ class MainActivity : Activity() {
         box.addView(search, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         val lv = ListView(this)
         lv.adapter = adapter
-        val h = (resources.displayMetrics.heightPixels * 0.55f).toInt()
+        val h = (resources.displayMetrics.heightPixels * 0.5f).toInt()
         box.addView(lv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h))
 
         val dlg = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-            .setTitle("PDF files")
+            .setTitle("Pane " + (target + 1) + " - choose PDF")
             .setView(box)
-            .setNeutralButton("Clear history") { _, _ -> confirmClearHistory() }
             .setNegativeButton("Close", null)
             .create()
 
+        bBrowse.setOnClickListener {
+            dlg.dismiss()
+            setActive(target)
+            openFiles()
+        }
+        bFolder.setOnClickListener {
+            dlg.dismiss()
+            openFolderFor(target)
+        }
+        bClear.setOnClickListener {
+            dlg.dismiss()
+            confirmClearHistory()
+        }
         lv.setOnItemClickListener { _, _, pos, _ ->
             if (pos >= 0 && pos < shown.size) {
                 val f = shown[pos]
                 dlg.dismiss()
-                openInPane(active, f)
+                openInPane(target, f)
             }
         }
         lv.setOnItemLongClickListener { _, _, pos, _ ->
             if (pos >= 0 && pos < shown.size) {
                 val f = shown[pos]
                 dlg.dismiss()
-                openInPane((active + 1) % paneCount, f)
+                openInPane((target + 1) % paneCount, f)
             }
             true
         }
