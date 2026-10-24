@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -487,6 +488,9 @@ class PageView(ctx: Context) : View(ctx) {
 class PdfPane(private val a: MainActivity, val index: Int) {
     val root = LinearLayout(a)
     private val titleRow = LinearLayout(a)
+    private val navRow = LinearLayout(a)
+    private val zoomRow = LinearLayout(a)
+    private val hRow = LinearLayout(a)
     private val title = TextView(a)
     private val pageEdit = EditText(a)
     private val totalTv = TextView(a)
@@ -536,7 +540,6 @@ class PdfPane(private val a: MainActivity, val index: Int) {
         root.addView(titleRow, LinearLayout.LayoutParams(match, wrap))
 
         // page navigation row
-        val navRow = LinearLayout(a)
         navRow.orientation = LinearLayout.HORIZONTAL
         navRow.gravity = Gravity.CENTER_VERTICAL
         val prevBtn = a.mkBtn("<")
@@ -581,7 +584,6 @@ class PdfPane(private val a: MainActivity, val index: Int) {
         root.addView(navRow, LinearLayout.LayoutParams(match, wrap))
 
         // go / zoom row
-        val zoomRow = LinearLayout(a)
         zoomRow.orientation = LinearLayout.HORIZONTAL
         val goBtn = a.mkBtn("Go")
         val zOut = a.mkBtn("-")
@@ -639,7 +641,6 @@ class PdfPane(private val a: MainActivity, val index: Int) {
         contentRow.addView(vbar, LinearLayout.LayoutParams(a.dp(14), match))
         root.addView(contentRow, LinearLayout.LayoutParams(match, 0, 1f))
 
-        val hRow = LinearLayout(a)
         hRow.orientation = LinearLayout.HORIZONTAL
         hRow.addView(hbar, LinearLayout.LayoutParams(0, match, 1f))
         hRow.addView(View(a), LinearLayout.LayoutParams(a.dp(14), match))
@@ -675,6 +676,17 @@ class PdfPane(private val a: MainActivity, val index: Int) {
 
     fun setActive(on: Boolean) {
         titleRow.setBackgroundColor(if (on) 0xFF1565C0.toInt() else 0xFF444444.toInt())
+    }
+
+    // show = false hides every control of the pane so only the PDF page remains
+    fun setChrome(show: Boolean) {
+        val v = if (show) View.VISIBLE else View.GONE
+        titleRow.visibility = v
+        navRow.visibility = v
+        zoomRow.visibility = v
+        seek.visibility = v
+        vbar.visibility = v
+        hRow.visibility = v
     }
 
     private fun updateBars() {
@@ -916,6 +928,12 @@ class MainActivity : Activity() {
     private val folderFiles = ArrayList<PdfItem>()
     private var paneCount = 2
     private var active = 0
+    private var chromeHidden = false
+    private var orientMode = 0
+    private lateinit var toolbar: LinearLayout
+    private lateinit var showStrip: TextView
+    private lateinit var orientBtn: Button
+    private val orientNames = arrayOf("Auto", "Locked", "Portrait", "Landscape")
 
     fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
 
@@ -952,22 +970,45 @@ class MainActivity : Activity() {
         val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
         val match = ViewGroup.LayoutParams.MATCH_PARENT
 
-        // toolbar: equal-weight buttons
-        val bar = LinearLayout(this)
-        bar.orientation = LinearLayout.HORIZONTAL
+        // slim strip, visible only while the toolbars are hidden (outside the PDF area)
+        showStrip = TextView(this)
+        showStrip.text = "▼  Show toolbar"
+        showStrip.textSize = 11f
+        showStrip.setTextColor(Color.WHITE)
+        showStrip.gravity = Gravity.CENTER
+        showStrip.setBackgroundColor(0xFF1565C0.toInt())
+        showStrip.visibility = View.GONE
+        showStrip.setOnClickListener { setChromeHidden(false) }
+        rootL.addView(showStrip, LinearLayout.LayoutParams(match, dp(22)))
+
+        // toolbar: two rows of equal-weight buttons
+        toolbar = LinearLayout(this)
+        toolbar.orientation = LinearLayout.VERTICAL
+        val row1 = LinearLayout(this)
+        row1.orientation = LinearLayout.HORIZONTAL
+        val row2 = LinearLayout(this)
+        row2.orientation = LinearLayout.HORIZONTAL
         val bOpen = mkBtn("Open PDFs")
         val bFolder = mkBtn("Folder")
         val bList = mkBtn("File list")
         paneBtn = mkBtn("Panes: 2")
+        orientBtn = mkBtn("Orient: Auto")
+        val bHide = mkBtn("Hide bars")
         bOpen.setOnClickListener { openFiles() }
         bFolder.setOnClickListener { openFolder() }
         bList.setOnClickListener { showFilesDialog() }
         paneBtn.setOnClickListener { setPaneCount(if (paneCount >= 3) 1 else paneCount + 1) }
-        bar.addView(bOpen, LinearLayout.LayoutParams(0, wrap, 1f))
-        bar.addView(bFolder, LinearLayout.LayoutParams(0, wrap, 1f))
-        bar.addView(bList, LinearLayout.LayoutParams(0, wrap, 1f))
-        bar.addView(paneBtn, LinearLayout.LayoutParams(0, wrap, 1f))
-        rootL.addView(bar, LinearLayout.LayoutParams(match, wrap))
+        orientBtn.setOnClickListener { showOrientDialog() }
+        bHide.setOnClickListener { setChromeHidden(true) }
+        row1.addView(bOpen, LinearLayout.LayoutParams(0, wrap, 1f))
+        row1.addView(bFolder, LinearLayout.LayoutParams(0, wrap, 1f))
+        row1.addView(bList, LinearLayout.LayoutParams(0, wrap, 1f))
+        row2.addView(paneBtn, LinearLayout.LayoutParams(0, wrap, 1f))
+        row2.addView(orientBtn, LinearLayout.LayoutParams(0, wrap, 1f))
+        row2.addView(bHide, LinearLayout.LayoutParams(0, wrap, 1f))
+        toolbar.addView(row1, LinearLayout.LayoutParams(match, wrap))
+        toolbar.addView(row2, LinearLayout.LayoutParams(match, wrap))
+        rootL.addView(toolbar, LinearLayout.LayoutParams(match, wrap))
 
         status = TextView(this)
         status.setTextColor(Color.LTGRAY)
@@ -991,6 +1032,10 @@ class MainActivity : Activity() {
         loadOpened()
         restoreSession()
         setPaneCount(paneCount)
+        orientMode = prefs.getInt("orient", 0).coerceIn(0, 3)
+        applyOrientation()
+        chromeHidden = prefs.getBoolean("chromeHidden", false)
+        applyChrome()
         handleViewIntent(intent)
 
         val folder = prefs.getString("folder", null)
@@ -998,6 +1043,72 @@ class MainActivity : Activity() {
             scanFolder(Uri.parse(folder), false)
         }
         updateStatus()
+    }
+
+    // ───── hide / show all toolbars ─────
+    fun setChromeHidden(h: Boolean) {
+        chromeHidden = h
+        prefs.edit().putBoolean("chromeHidden", h).apply()
+        applyChrome()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyChrome() {
+        val showBars = !chromeHidden
+        toolbar.visibility = if (showBars) View.VISIBLE else View.GONE
+        status.visibility = if (showBars) View.VISIBLE else View.GONE
+        showStrip.visibility = if (showBars) View.GONE else View.VISIBLE
+        for (p in panes) p.setChrome(showBars)
+        var flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        if (chromeHidden) {
+            flags = flags or View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        }
+        window.decorView.systemUiVisibility = flags
+    }
+
+    // ───── orientation lock ─────
+    private fun applyOrientation() {
+        requestedOrientation = when (orientMode) {
+            1 -> ActivityInfo.SCREEN_ORIENTATION_LOCKED
+            2 -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            3 -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            else -> ActivityInfo.SCREEN_ORIENTATION_SENSOR
+        }
+        orientBtn.text = "Orient: " + orientNames[orientMode]
+    }
+
+    private fun setOrientMode(m: Int) {
+        orientMode = m.coerceIn(0, 3)
+        prefs.edit().putInt("orient", orientMode).apply()
+        applyOrientation()
+    }
+
+    private fun showOrientDialog() {
+        val items = arrayOf(
+            "Auto-rotate (follow phone)",
+            "Lock current orientation",
+            "Portrait",
+            "Landscape"
+        )
+        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("Screen orientation")
+            .setSingleChoiceItems(items, orientMode) { d, which ->
+                setOrientMode(which)
+                d.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (chromeHidden) {
+            setChromeHidden(false)
+        } else {
+            super.onBackPressed()
+        }
     }
 
     // ───── focus / keyboard helpers ─────
@@ -1022,7 +1133,13 @@ class MainActivity : Activity() {
                 KeyEvent.KEYCODE_O -> { openFiles(); true }
                 KeyEvent.KEYCODE_D -> { openFolder(); true }
                 KeyEvent.KEYCODE_L -> { showFilesDialog(); true }
-                KeyEvent.KEYCODE_G -> { p.focusPageBox(); true }
+                KeyEvent.KEYCODE_G -> {
+                    if (chromeHidden) setChromeHidden(false)
+                    p.focusPageBox()
+                    true
+                }
+                KeyEvent.KEYCODE_H -> { setChromeHidden(!chromeHidden); true }
+                KeyEvent.KEYCODE_R -> { setOrientMode((orientMode + 1) % 4); true }
                 KeyEvent.KEYCODE_1 -> { setPaneCount(1); true }
                 KeyEvent.KEYCODE_2 -> { setPaneCount(2); true }
                 KeyEvent.KEYCODE_3 -> { setPaneCount(3); true }
@@ -1052,6 +1169,8 @@ class MainActivity : Activity() {
         return when (code) {
             KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_DPAD_RIGHT -> { p.nextPage(); true }
             KeyEvent.KEYCODE_DPAD_LEFT -> { p.prevPage(); true }
+            KeyEvent.KEYCODE_H -> { setChromeHidden(!chromeHidden); true }
+            KeyEvent.KEYCODE_R -> { setOrientMode((orientMode + 1) % 4); true }
             KeyEvent.KEYCODE_DPAD_DOWN -> { p.pv.wheelPan(0f, -120f, true); true }
             KeyEvent.KEYCODE_DPAD_UP -> { p.pv.wheelPan(0f, 120f, true); true }
             KeyEvent.KEYCODE_MOVE_HOME -> { p.goToPage(0, 1); true }
